@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Scanner · Control de Asistencia</title>
+
+<style>
+:root{
+  --ok:#2ecc71; --warn:#f1c40f; --bad:#e74c3c;
+  --bg:#0e0b08; --card:#16110d; --txt:#f5efe7;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Arial}
+.wrap{max-width:900px;margin:auto;padding:14px}
+.card{background:var(--card);border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:14px}
+h1{margin:0;font-size:22px}
+.sub{opacity:.8;font-size:13px;margin-bottom:8px}
+video{width:100%;border-radius:14px;background:#000;margin-top:10px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+button{
+  padding:14px 16px;border-radius:14px;
+  border:1px solid rgba(255,255,255,.18);
+  background:#241a13;color:#fff;font-size:16px;cursor:pointer
+}
+
+/* CONTADOR */
+.counter{
+  margin-top:12px;
+  padding:18px;
+  border-radius:16px;
+  text-align:center;
+  background:rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.12)
+}
+.counterNum{
+  font-size:46px;
+  font-weight:800;
+  letter-spacing:.05em;
+}
+.counterLab{
+  font-size:13px;
+  opacity:.85;
+}
+
+/* ESTADO */
+.status{
+  margin-top:12px;
+  padding:14px;
+  border-radius:14px;
+  text-align:center;
+  font-size:20px;
+  font-weight:700;
+}
+.ok{background:rgba(46,204,113,.15);border:1px solid var(--ok);color:var(--ok)}
+.warn{background:rgba(241,196,15,.15);border:1px solid var(--warn);color:var(--warn)}
+.bad{background:rgba(231,76,60,.15);border:1px solid var(--bad);color:var(--bad)}
+
+.log{margin-top:10px;font-size:12px;opacity:.8;white-space:pre-wrap}
+</style>
+</head>
+
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>📷 Scanner de Asistencia</h1>
+    <div class="sub">Escanea el QR. El registro es automático.</div>
+
+    <!-- CONTADOR -->
+    <div class="counter">
+      <div id="counterNum" class="counterNum">0</div>
+      <div class="counterLab">Asistentes registrados</div>
+    </div>
+
+    <video id="video" playsinline></video>
+
+    <div class="row">
+      <button id="btnStart">▶ Iniciar cámara</button>
+      <button id="btnStop">⏹ Detener</button>
+    </div>
+
+    <div id="status" class="status">Listo</div>
+    <div id="log" class="log">—</div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/jsqr/dist/jsQR.js"></script>
+
+<script>
+/* ===== CONFIG ===== */
+const ENDPOINT = "https://script.google.com/macros/s/AKfycbz3dDj647w_w_fUopCfYCKcTuO1x7Iy2XfU81J5P6yJK2V9lvxTwCgRHn1jWGmucMIsWw/exec";
+const COOLDOWN_MS = 1200;
+
+/* ===== AUDIO ===== */
+const beep = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=");
+function vibrate(){ if(navigator.vibrate) navigator.vibrate(120); }
+
+/* ===== UI ===== */
+const video = document.getElementById("video");
+const btnStart = document.getElementById("btnStart");
+const btnStop = document.getElementById("btnStop");
+const statusEl = document.getElementById("status");
+const logEl = document.getElementById("log");
+const counterNum = document.getElementById("counterNum");
+
+/* ===== SCAN ===== */
+let stream=null, scanning=false, lock=false, lastToken="";
+const canvas=document.createElement("canvas");
+const ctx=canvas.getContext("2d",{willReadFrequently:true});
+
+function setStatus(txt, cls){
+  statusEl.className="status "+(cls||"");
+  statusEl.textContent=txt;
+}
+function log(t){ logEl.textContent=t; }
+
+function extractToken(text){
+  try{ const o=JSON.parse(text); return (o.token||"").trim(); }catch(_){ return ""; }
+}
+
+/* ===== CONTADOR EN VIVO ===== */
+async function refreshCounter(){
+  try{
+    const res = await fetch(ENDPOINT + "?count=1");
+    const data = await res.json().catch(()=>({}));
+    if(data.ok && typeof data.count==="number"){
+      counterNum.textContent = data.count;
+    }
+  }catch(_){}
+}
+
+/* ===== CHECK-IN ===== */
+async function checkin(token){
+  if(lock) return;
+  lock=true;
+  try{
+    const url = ENDPOINT + "?checkin=1&token=" + encodeURIComponent(token);
+    const r = await fetch(url);
+    const d = await r.json().catch(()=>({}));
+
+    if(d.ok){
+      if(d.status==="YA_REGISTRADO"){
+        setStatus("⚠️ YA REGISTRADO","warn");
+      }else{
+        setStatus("✅ REGISTRADO","ok");
+        refreshCounter(); // ACTUALIZA CONTADOR
+      }
+      beep.play(); vibrate();
+    }else{
+      setStatus("❌ ERROR","bad");
+    }
+    log(JSON.stringify(d,null,2));
+  }catch(e){
+    setStatus("❌ ERROR DE RED","bad");
+    log(String(e));
+  }finally{
+    setTimeout(()=>{ lock=false; }, COOLDOWN_MS);
+  }
+}
+
+/* ===== CAMARA ===== */
+btnStart.onclick = async ()=>{
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"},audio:false});
+    video.srcObject = stream; await video.play();
+    scanning=true; setStatus("Escaneando…"); scanLoop();
+    refreshCounter();
+  }catch(e){
+    setStatus("No se pudo abrir la cámara","bad");
+  }
+};
+btnStop.onclick = ()=>{
+  scanning=false;
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+  setStatus("Detenido");
+};
+
+/* ===== LOOP ===== */
+function scanLoop(){
+  if(!scanning) return;
+  if(video.readyState === video.HAVE_ENOUGH_DATA){
+    canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+    ctx.drawImage(video,0,0,canvas.width,canvas.height);
+    const img=ctx.getImageData(0,0,canvas.width,canvas.height);
+    const code=jsQR(img.data,img.width,img.height,{inversionAttempts:"dontInvert"});
+    if(code && code.data){
+      const token = extractToken(code.data);
+      if(token && token!==lastToken){
+        lastToken=token;
+        checkin(token);
+      }
+    }
+  }
+  requestAnimationFrame(scanLoop);
+}
+</script>
+</body>
+</html>
